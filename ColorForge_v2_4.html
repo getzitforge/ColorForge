@@ -1,0 +1,86 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1"><title>ColorForge v2.4</title><style>
+*{box-sizing:border-box}html,body{width:100%;max-width:100%;overflow-x:hidden;overscroll-behavior:none}body{margin:0;background:#17212e;color:#eef4fb;font:15px system-ui,-apple-system,sans-serif}header{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:10px 14px;background:#253447}button,.file{background:#35465e;border:1px solid #72839b;color:white;border-radius:8px;padding:10px;cursor:pointer;font:inherit}button:disabled{opacity:.4}button.active{outline:3px solid #7ed9fc}input[type=file]{max-width:250px}main{display:grid;width:100%;min-width:0;grid-template-columns:270px minmax(0,1fr);height:calc(100dvh - 68px);min-height:400px}aside{min-width:0;padding:15px;overflow:auto;background:#222f3f}h3{margin:12px 0}p{font-size:13px;line-height:1.45;color:#cad6e4}.row{display:flex;gap:7px;flex-wrap:wrap;margin:8px 0}.swatch{width:45px;height:45px;border:3px solid #9eacbb;border-radius:9px}.swatch.active{border-color:#7ed9fc;outline:2px solid white}#view{min-width:0;position:relative;overflow:hidden;background:#40536b;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}#view canvas{display:block;touch-action:none;user-select:none;-webkit-user-select:none}#status{position:absolute;bottom:8px;left:8px;right:8px;background:#14212bcf;border-radius:7px;padding:8px;pointer-events:none}#cursor{position:absolute;width:16px;height:16px;border:2px solid #00edff;border-radius:50%;pointer-events:none;display:none;transform:translate(-50%,-50%);box-shadow:0 0 2px black}input[type=range]{width:100%}label{display:block;margin-top:10px}@media(max-width:700px){main{grid-template-columns:180px minmax(0,1fr)}aside{padding:8px}header{gap:5px}button{padding:7px}}
+</style><script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.164.1/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.164.1/examples/jsm/"}}</script></head><body><header><strong>ColorForge v2.4</strong><label>Open GLB <input id="file" type="file" accept=".glb,model/gltf-binary"></label><button id="save" disabled>Export painted GLB</button><button id="restore" disabled>Restore original</button></header><main><aside><h3>Tool</h3><div class="row"><button id="rotate" class="active">Rotate</button><button id="paint">Paint</button><button id="resetView">Reset View</button></div><p>Paint mode: touch or draw on the model. Switch to Rotate to reposition the model.</p><h3>Brush</h3><label>Size: <span id="sizeLabel">12</span> texture pixels <input id="size" type="range" min="1" max="80" step="1" value="12"></label><div class="row"><button id="smaller" type="button">− Smaller</button><button id="larger" type="button">+ Larger</button></div><div class="row" id="colors"></div><h3>History</h3><div class="row"><button id="undo" disabled>Undo</button></div><p>v2.4: connected UV strokes with adaptive brush width and stroke diagnostics.</p><h3>Diagnostics</h3><p>Texture preview (red crosshair = last touch):</p><canvas id="uvPreview" width="240" height="240" style="width:100%;background:#eee;border:1px solid #71849a"></canvas><p id="strokeStats">Stroke diagnostics: no stroke yet.</p><p id="diag">Load a textured GLB. Version 1.7 uses source texture flipY and displays the paint position on the texture map.</p><p>Important: if paint appears in multiple places, the model may reuse texture coordinates. This prototype does not yet repair overlapping UVs.</p></aside><div id="view"><div id="cursor"></div><div id="status">Loading 3D engine… internet required for first load.</div></div></main><script type="module">
+import * as THREE from 'three';import {OrbitControls} from 'three/addons/controls/OrbitControls.js';import {GLTFLoader} from 'three/addons/loaders/GLTFLoader.js';import {GLTFExporter} from 'three/addons/exporters/GLTFExporter.js';
+const $=id=>document.getElementById(id), view=$('view'),status=$('status');let scene,camera,renderer,controls,model,modelRadius=1,homePosition=null,homeTarget=null,canvas,ctx,texture,sourceMap,original,painting=false,down=false,last=null,lastScreen=null,refreshQueued=false,dirty=false,lastUpload=0,uploadTimer=null,color='#ffffff',history=[],activePointers=new Set(),strokeId=null,touches=0,marks=0,updates=0;const ray=new THREE.Raycaster(),mouse=new THREE.Vector2();
+function say(t){status.textContent=t}function init(){scene=new THREE.Scene();scene.background=new THREE.Color('#40536b');camera=new THREE.PerspectiveCamera(40,1,.01,10000);renderer=new THREE.WebGLRenderer({antialias:true,preserveDrawingBuffer:false});renderer.setPixelRatio(Math.min(devicePixelRatio,2));renderer.outputColorSpace=THREE.SRGBColorSpace;view.prepend(renderer.domElement);const overlay=document.createElement('canvas');overlay.id='strokeOverlay';overlay.style.cssText='position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:2';view.appendChild(overlay);window.strokeOverlay=overlay;controls=new OrbitControls(camera,renderer.domElement);controls.enableDamping=true;scene.add(new THREE.HemisphereLight(0xffffff,0x687b90,2.5));const light=new THREE.DirectionalLight(0xffffff,2);light.position.set(3,6,8);scene.add(light);new ResizeObserver(resize).observe(view);resize();function animate(){requestAnimationFrame(animate);controls.update();renderer.render(scene,camera)}animate();say('Open a textured GLB model to begin.')}function resize(){if(!renderer)return;let w=view.clientWidth,h=view.clientHeight;renderer.setSize(w,h);if(window.strokeOverlay){strokeOverlay.width=w;strokeOverlay.height=h;}camera.aspect=w/h;camera.updateProjectionMatrix()}
+const palette=['#ffffff','#111111','#d92928','#267bd5'];palette.forEach(c=>{const b=document.createElement('button');b.className='swatch'+(c===color?' active':'');b.style.background=c;b.setAttribute('aria-label',c);b.onclick=()=>{color=c;document.querySelectorAll('.swatch').forEach(x=>x.classList.remove('active'));b.classList.add('active')};$('colors').append(b)});$('size').oninput=()=>{$('sizeLabel').textContent=$('size').value};function changeBrush(delta){$('size').value=Math.max(1,Math.min(80,Number($('size').value)+delta));$('size').dispatchEvent(new Event('input'))}$('smaller').onclick=()=>changeBrush(-1);$('larger').onclick=()=>changeBrush(1);function mode(p){painting=p;$('paint').classList.toggle('active',p);$('rotate').classList.toggle('active',!p);controls.enabled=!p;down=false;strokeId=null;last=null;lastScreen=null;say(p?'Paint mode: draw on the model.':'Rotate mode.')} $('paint').onclick=()=>mode(true);$('rotate').onclick=()=>mode(false);$('resetView').onclick=()=>{if(!homePosition)return;camera.position.copy(homePosition);controls.target.copy(homeTarget);controls.update();say('View reset.');};
+function snapshot(){if(!ctx)return;history.push(ctx.getImageData(0,0,canvas.width,canvas.height));if(history.length>8)history.shift();$('undo').disabled=false}function uploadTexture(){if(!texture||!dirty)return;dirty=false;lastUpload=performance.now();texture.needsUpdate=true;updates++;}
+function refresh(force=false){if(!texture)return;dirty=true;if(force||!down){if(uploadTimer){clearTimeout(uploadTimer);uploadTimer=null;}uploadTexture();}}
+ $('undo').onclick=()=>{if(!history.length)return;ctx.putImageData(history.pop(),0,0);refresh();$('undo').disabled=!history.length};$('restore').onclick=()=>{if(!original)return;snapshot();ctx.putImageData(original,0,0);refresh();say('Original texture restored.')};
+$('file').onchange=async e=>{let file=e.target.files[0];if(!file)return;say('Loading '+file.name+'…');try{const buf=await file.arrayBuffer();const gltf=await new GLTFLoader().parseAsync(buf,'');if(model)scene.remove(model);model=gltf.scene;let mesh=null;model.traverse(o=>{if(o.isMesh&&o.geometry.attributes.uv&&o.material?.map&&!mesh)mesh=o});if(!mesh)throw Error('No mesh with UVs and color texture found.');const map=mesh.material.map;sourceMap=map;const img=map.image;if(!img||!img.width||!img.height)throw Error('Texture image unavailable.');canvas=document.createElement('canvas');canvas.width=img.width;canvas.height=img.height;ctx=canvas.getContext('2d',{willReadFrequently:true});ctx.drawImage(img,0,0);original=ctx.getImageData(0,0,canvas.width,canvas.height);texture=new THREE.CanvasTexture(canvas);texture.flipY=map.flipY;texture.offset.copy(map.offset);texture.repeat.copy(map.repeat);texture.rotation=map.rotation;texture.center.copy(map.center);texture.colorSpace=THREE.SRGBColorSpace;texture.wrapS=map.wrapS;texture.wrapT=map.wrapT;texture.magFilter=map.magFilter;texture.minFilter=THREE.LinearFilter;texture.generateMipmaps=false;texture.needsUpdate=true;model.traverse(o=>{if(o.isMesh&&o.material?.map){o.material=o.material.clone();o.material.map=texture;o.material.needsUpdate=true}});scene.add(model);const box=new THREE.Box3().setFromObject(model),sphere=box.getBoundingSphere(new THREE.Sphere());modelRadius=Math.max(sphere.radius,0.0001);controls.target.copy(sphere.center);camera.position.copy(sphere.center).add(new THREE.Vector3(0,0,Math.max(sphere.radius*3,1)));camera.near=Math.max(sphere.radius/1000,.001);camera.far=Math.max(sphere.radius*100,100);camera.updateProjectionMatrix();controls.update();homePosition=camera.position.clone();homeTarget=controls.target.clone();history=[];pending=[];clearOverlay();strokeId=null;activePointers.clear();touches=0;marks=0;updates=0;$('undo').disabled=true;$('save').disabled=false;$('restore').disabled=false;$('diag').textContent=`Texture ${canvas.width} × ${canvas.height}; UV painting active. Texture flipY=${texture.flipY}; mapping follows the source GLB texture.`;preview(null);say('Loaded '+file.name+'. Ready to paint.')}catch(err){say('Load error: '+err.message);console.error(err)}};
+function pick(e){
+ if(!model)return null;
+ const rect=renderer.domElement.getBoundingClientRect();
+ const sx=(e.clientX-rect.left)/rect.width,sy=(e.clientY-rect.top)/rect.height;
+ mouse.set(sx*2-1,1-sy*2);ray.setFromCamera(mouse,camera);
+ const hit=ray.intersectObject(model,true).find(h=>h.uv);
+ if(!hit)return null;
+ // GLTFLoader's texture has flipY=false: canvas top row corresponds to UV v=0.
+ // Do not invert v unless the actual texture uses flipY=true.
+ const uv=hit.uv.clone();
+ const uvTransformed=uv.clone();sourceMap.transformUv(uvTransformed);
+ const u=THREE.MathUtils.clamp(uvTransformed.x,0,1-1e-8);
+ const v=THREE.MathUtils.clamp(uvTransformed.y,0,1-1e-8);
+ return {x:u*canvas.width,y:(sourceMap.flipY?1-v:v)*canvas.height,uv,point:hit.point,sx:e.clientX,sy:e.clientY};
+}
+function preview(hit){
+ const out=$('uvPreview'),p=out.getContext('2d');p.clearRect(0,0,out.width,out.height);
+ if(!canvas)return;
+ p.drawImage(canvas,0,0,out.width,out.height);
+ if(hit){const x=hit.x/canvas.width*out.width,y=hit.y/canvas.height*out.height;
+ p.strokeStyle='#ff1e1e';p.lineWidth=2;p.beginPath();p.moveTo(x-9,y);p.lineTo(x+9,y);p.moveTo(x,y-9);p.lineTo(x,y+9);p.stroke();}
+}
+// Join nearby UV samples, but never bridge distant texture islands.
+let strokeSamples=0,strokeJoins=0,strokeBreaks=0,strokeRadius=0;
+function stamp(x,y,r){marks++;ctx.fillStyle=color;ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.fill()}
+function mark(hit){
+ if(!hit){last=null;strokeBreaks++;return;}
+ const base=Math.max(1,+$('size').value/2);
+ let radius=base;
+ if(last){
+  const texDist=Math.hypot(hit.x-last.x,hit.y-last.y);
+  const worldDist=hit.point.distanceTo(last.point);
+  // A discontinuity in the UV atlas can be many pixels even when surfaces touch.
+  // World distance guards against joining unrelated geometry sharing texture space.
+  const plausible=worldDist<modelRadius*.12 && texDist<Math.max(35,base*9);
+  if(plausible){
+   const screenDist=Math.max(0.1,Math.hypot(hit.sx-last.sx,hit.sy-last.sy));
+   // Brush width is specified in texture pixels. Avoid large UV jumps and
+   // draw an actual continuous texture-space segment instead of separated dots.
+   radius=Math.max(base,Math.min(base*2.5,texDist/screenDist*2.3));
+   ctx.strokeStyle=color;ctx.lineWidth=radius*2;ctx.lineCap='round';ctx.lineJoin='round';
+   ctx.beginPath();ctx.moveTo(last.x,last.y);ctx.lineTo(hit.x,hit.y);ctx.stroke();strokeJoins++;
+  }else{strokeBreaks++;}
+ }
+ stamp(hit.x,hit.y,radius);strokeSamples++;strokeRadius=Math.max(strokeRadius,radius);
+ last={x:hit.x,y:hit.y,point:hit.point.clone(),sx:hit.sx,sy:hit.sy};dirty=true;
+}
+function cursor(e){const r=view.getBoundingClientRect();$('cursor').style.left=(e.clientX-r.left)+'px';$('cursor').style.top=(e.clientY-r.top)+'px';$('cursor').style.display='block'}
+// Keep pointer ownership on the actual WebGL canvas; Safari may cancel capture on a parent div.
+init();
+const surface=renderer.domElement;
+let pending=[],strokeFrame=0,finishRequested=false,overlayLast=null,strokeColor='#ffffff',strokeWidth=12;
+function overlayPoint(x,y,begin=false){const c=window.strokeOverlay;if(!c)return;const r=surface.getBoundingClientRect(),px=(x-r.left)*c.width/r.width,py=(y-r.top)*c.height/r.height;const g=c.getContext('2d');g.strokeStyle=strokeColor;g.fillStyle=strokeColor;g.lineWidth=Math.max(2,strokeWidth*0.65);g.lineCap='round';g.lineJoin='round';if(begin||!overlayLast){g.beginPath();g.arc(px,py,g.lineWidth/2,0,Math.PI*2);g.fill();}else{g.beginPath();g.moveTo(overlayLast.x,overlayLast.y);g.lineTo(px,py);g.stroke();}overlayLast={x:px,y:py};}
+function clearOverlay(){const c=window.strokeOverlay;if(c)c.getContext('2d').clearRect(0,0,c.width,c.height);overlayLast=null;}
+function enqueuePoint(x,y){const prev=pending[pending.length-1];if(!prev||Math.hypot(x-prev.x,y-prev.y)>1)pending.push({x,y});if(!strokeFrame)strokeFrame=requestAnimationFrame(paintFrame)}
+function paintFrame(){strokeFrame=0;if(!model||!ctx){pending=[];clearOverlay();return;}const started=performance.now();let processed=0;
+ while(pending.length&&processed<55&&performance.now()-started<11){const target=pending[0];if(!lastScreen){mark(pick({clientX:target.x,clientY:target.y}));lastScreen=target;pending.shift();processed++;continue;}
+ const dx=target.x-lastScreen.x,dy=target.y-lastScreen.y,dist=Math.hypot(dx,dy);
+ // Raycast every ~7 screen pixels; canvas strokes connect samples on the same UV island.
+ if(dist<0.1){pending.shift();continue;}
+ const step=Math.min(2.0,dist),t=step/dist;const next={x:lastScreen.x+dx*t,y:lastScreen.y+dy*t};mark(pick({clientX:next.x,clientY:next.y}));lastScreen=next;processed++;
+ if(dist<=2.001)pending.shift();
+ }
+ if(dirty && performance.now()-lastUpload>85)uploadTexture();if(pending.length){strokeFrame=requestAnimationFrame(paintFrame);}else if(finishRequested){finishRequested=false;last=null;lastScreen=null;refresh(true);$('strokeStats').textContent=`Last stroke: ${strokeSamples} samples, ${strokeJoins} connected, ${strokeBreaks} UV/surface breaks, max brush radius ${strokeRadius.toFixed(1)} texture px.`;requestAnimationFrame(()=>requestAnimationFrame(()=>requestAnimationFrame(clearOverlay)));}else if(dirty){uploadTexture();}
+}
+function startStroke(e){if(!painting||!model||!e.isPrimary||(e.pointerType==='mouse'&&e.button!==0))return;
+ e.preventDefault();strokeId=e.pointerId;down=true;last=null;lastScreen=null;pending=[];finishRequested=false;strokeSamples=0;strokeJoins=0;strokeBreaks=0;strokeRadius=0;touches++;snapshot();cursor(e);strokeColor=color;strokeWidth=+$('size').value;clearOverlay();overlayPoint(e.clientX,e.clientY,true);
+ try{surface.setPointerCapture(e.pointerId)}catch(_){}enqueuePoint(e.clientX,e.clientY);}
+function moveStroke(e){if(!painting||!down||e.pointerId!==strokeId)return;e.preventDefault();cursor(e);overlayPoint(e.clientX,e.clientY);enqueuePoint(e.clientX,e.clientY);}
+function stopStroke(e){if(strokeId!==null&&e.pointerId!==strokeId)return;if(down&&e&&Number.isFinite(e.clientX))enqueuePoint(e.clientX,e.clientY);down=false;strokeId=null;finishRequested=true;if(!strokeFrame)strokeFrame=requestAnimationFrame(paintFrame);$('cursor').style.display='none';}
+surface.addEventListener('pointerdown',startStroke,{passive:false});surface.addEventListener('pointermove',moveStroke,{passive:false});surface.addEventListener('pointerup',stopStroke);surface.addEventListener('pointercancel',stopStroke);surface.addEventListener('lostpointercapture',stopStroke);
+window.addEventListener('pointerup',stopStroke);window.addEventListener('blur',()=>{down=false;strokeId=null;pending=[];finishRequested=false;last=null;lastScreen=null;clearOverlay()});
+document.addEventListener('touchmove',e=>{if(e.target.closest('#view'))e.preventDefault()},{passive:false});view.addEventListener('contextmenu',e=>e.preventDefault());view.addEventListener('selectstart',e=>e.preventDefault());
+$('save').onclick=()=>{if(!model)return;refresh(true);say('Exporting painted GLB…');new GLTFExporter().parse(model,blob=>{const url=URL.createObjectURL(new Blob([blob],{type:'model/gltf-binary'}));const a=document.createElement('a');a.href=url;a.download='ColorForge_painted.glb';a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);say('Export complete.')},err=>say('Export error: '+err.message),{binary:true,onlyVisible:true,trs:false})};
+</script></body></html>
